@@ -15,6 +15,13 @@ import { Salon } from './salon.entity';
 // represented correctly. Updated by the Simple Salon roster sync job (§4.1):
 // is_active flips to false after 1 rolling month with no roster in that salon;
 // an employee has left the group once is_active is false on every assignment.
+//
+// is_primary (§5, §6.10 revised): the employee's contractual home salon.
+// Hours worked in any OTHER (non-primary) salon are paid at the flat casual
+// rate_card rate regardless of the employee's real level — see §6.10. At
+// most one row per employee has is_primary = true (partial unique index in
+// the migration); it's legitimately zero right after auto-onboarding, before
+// HQ/the manager confirms which salon is primary.
 @Entity('employee_salon_assignments')
 export class EmployeeSalonAssignment {
   @PrimaryColumn({ name: 'employee_id', type: 'uuid' })
@@ -33,6 +40,9 @@ export class EmployeeSalonAssignment {
 
   @Column({ name: 'is_active', type: 'boolean', default: true })
   isActive: boolean;
+
+  @Column({ name: 'is_primary', type: 'boolean', default: false })
+  isPrimary: boolean;
 
   @Column({ name: 'first_seen_roster_date', type: 'date' })
   firstSeenRosterDate: string;

@@ -1,9 +1,15 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 // Initial schema for the Franck Provost performance app — implements every
-// table in spec §5 "Modèle de données", plus the additions documented in the
-// entity files (employee_level_history, flagged_weeks, and a handful of
-// employee columns needed for auth/onboarding/fixed-salary flagging).
+// table in spec §5 "Modèle de données" (as revised by the Career & Benefits
+// 2026 update: §4.3 employment_type/rate_card/public_holiday, §6.10 revised
+// multi-salon wage split), plus employee_level_history and a handful of
+// employee columns needed for auth/onboarding (documented in the entities
+// and in the PR/summary).
+//
+// This branch has not been deployed anywhere yet, so this migration is
+// edited in place for the employment_type/rate_card revision rather than
+// layered under a second migration — there is no live schema to preserve.
 export class InitSchema1700000000000 implements MigrationInterface {
   name = 'InitSchema1700000000000';
 
@@ -14,19 +20,25 @@ export class InitSchema1700000000000 implements MigrationInterface {
     await queryRunner.query(
       `CREATE TYPE "employee_role_enum" AS ENUM ('stylist', 'manager', 'hq')`,
     );
+    // §4.3 — replaces the old pay_type_enum (fixed_salary | hourly_variable).
     await queryRunner.query(
-      `CREATE TYPE "pay_type_enum" AS ENUM ('fixed_salary', 'hourly_variable')`,
+      `CREATE TYPE "employment_type_enum" AS ENUM ('contracted', 'casual', 'freelancer')`,
     );
     await queryRunner.query(
       `CREATE TYPE "employee_level_enum" AS ENUM ('emerging_stylist', 'senior_stylist', 'advanced_senior_stylist', 'master_stylist', 'head_stylist')`,
     );
-    await queryRunner.query(`CREATE TYPE "day_type_enum" AS ENUM ('weekday', 'saturday', 'sunday')`);
+    // rate_card's rate lookup key — 4 contracted levels + casual. Deliberately
+    // distinct from employee_level_enum (see rate-card.entity.ts).
+    await queryRunner.query(
+      `CREATE TYPE "rate_tier_enum" AS ENUM ('emerging_stylist', 'senior_stylist', 'advanced_senior_stylist', 'master_stylist', 'casual')`,
+    );
+    // §4.3 adds public_holiday.
+    await queryRunner.query(
+      `CREATE TYPE "day_type_enum" AS ENUM ('weekday', 'saturday', 'sunday', 'public_holiday')`,
+    );
     await queryRunner.query(`CREATE TYPE "pay_source_enum" AS ENUM ('pay_template', 'timesheet')`);
     await queryRunner.query(
       `CREATE TYPE "notification_trigger_enum" AS ENUM ('proximity_to_target', 'milestone_crossed', 'weekly_recap')`,
-    );
-    await queryRunner.query(
-      `CREATE TYPE "flagged_week_status_enum" AS ENUM ('pending', 'reviewed')`,
     );
 
     // --- Core: salons / employees -------------------------------------------
@@ -51,11 +63,14 @@ export class InitSchema1700000000000 implements MigrationInterface {
         "phone" varchar(32),
         "pin_hash" varchar(255),
         "role" employee_role_enum NOT NULL DEFAULT 'stylist',
-        "pay_type" pay_type_enum NOT NULL,
+        "employment_type" employment_type_enum NOT NULL,
         "level" employee_level_enum NOT NULL,
-        "contracted_hours_per_week" numeric(5,2),
         "created_at" timestamptz NOT NULL DEFAULT now(),
-        "updated_at" timestamptz NOT NULL DEFAULT now()
+        "updated_at" timestamptz NOT NULL DEFAULT now(),
+        CONSTRAINT "chk_employees_head_stylist_is_freelancer" CHECK (
+          ("level" = 'head_stylist' AND "employment_type" = 'freelancer')
+          OR ("level" <> 'head_stylist' AND "employment_type" <> 'freelancer')
+        )
       )
     `);
     await queryRunner.query(
@@ -70,6 +85,7 @@ export class InitSchema1700000000000 implements MigrationInterface {
         "employee_id" uuid NOT NULL REFERENCES "employees"("id") ON DELETE CASCADE,
         "salon_id" uuid NOT NULL REFERENCES "salons"("id") ON DELETE CASCADE,
         "is_active" boolean NOT NULL DEFAULT true,
+        "is_primary" boolean NOT NULL DEFAULT false,
         "first_seen_roster_date" date NOT NULL,
         "last_seen_roster_date" date NOT NULL,
         "created_at" timestamptz NOT NULL DEFAULT now(),
@@ -77,15 +93,19 @@ export class InitSchema1700000000000 implements MigrationInterface {
         PRIMARY KEY ("employee_id", "salon_id")
       )
     `);
+    // At most one primary salon per employee (§6.10 revised) — zero is valid
+    // right after auto-onboarding, before a primary salon is confirmed.
+    await queryRunner.query(
+      `CREATE UNIQUE INDEX "idx_employee_salon_assignments_one_primary" ON "employee_salon_assignments" ("employee_id") WHERE "is_primary" = true`,
+    );
 
+    // §4.3/§5 — official Career & Benefits 2026 pay grid, replaces employee_rates.
     await queryRunner.query(`
-      CREATE TABLE "employee_rates" (
-        "employee_id" uuid PRIMARY KEY REFERENCES "employees"("id") ON DELETE CASCADE,
-        "weekday_rate" numeric(10,2) NOT NULL,
-        "saturday_rate" numeric(10,2) NOT NULL,
-        "sunday_rate" numeric(10,2) NOT NULL,
-        "created_at" timestamptz NOT NULL DEFAULT now(),
-        "updated_at" timestamptz NOT NULL DEFAULT now()
+      CREATE TABLE "rate_card" (
+        "level" rate_tier_enum NOT NULL,
+        "day_type" day_type_enum NOT NULL,
+        "rate" numeric(10,2) NOT NULL,
+        PRIMARY KEY ("level", "day_type")
       )
     `);
 
@@ -141,14 +161,16 @@ export class InitSchema1700000000000 implements MigrationInterface {
     `);
 
     // --- Calculated targets / commissions -----------------------------------
+    // service_target/retail_target nullable — §4.3 makes them conditional on
+    // employment_type (casual: no service_target; freelancer: neither).
     await queryRunner.query(`
       CREATE TABLE "kpi_targets" (
         "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         "employee_id" uuid NOT NULL REFERENCES "employees"("id") ON DELETE CASCADE,
         "salon_id" uuid NOT NULL REFERENCES "salons"("id") ON DELETE CASCADE,
         "week_start" date NOT NULL,
-        "service_target" numeric(12,2) NOT NULL,
-        "retail_target" numeric(12,2) NOT NULL,
+        "service_target" numeric(12,2),
+        "retail_target" numeric(12,2),
         "rebooking_target" numeric(5,2) NOT NULL,
         "avg_spend_target" numeric(10,2) NOT NULL,
         "treatment_conversion_target" numeric(5,2) NOT NULL,
@@ -167,14 +189,18 @@ export class InitSchema1700000000000 implements MigrationInterface {
         "day_type" day_type_enum NOT NULL,
         "hours_scheduled" numeric(5,2) NOT NULL,
         "weighted_hours" numeric(10,4) NOT NULL,
-        "daily_service_target" numeric(12,2) NOT NULL,
-        "daily_retail_target" numeric(12,2) NOT NULL,
+        "daily_service_target" numeric(12,2),
+        "daily_retail_target" numeric(12,2),
         "week_start" date NOT NULL,
         "created_at" timestamptz NOT NULL DEFAULT now(),
         UNIQUE ("employee_id", "salon_id", "date")
       )
     `);
 
+    // retail_target/retail_target_reached/service_target/service_target_reached
+    // nullable for the same §4.3 reasons as kpi_targets. *_actual and
+    // commission_* stay NOT NULL: actuals always exist, and $0 commission is
+    // a real computed value (not an absence of a target).
     await queryRunner.query(`
       CREATE TABLE "employee_commissions" (
         "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -182,12 +208,12 @@ export class InitSchema1700000000000 implements MigrationInterface {
         "salon_id" uuid NOT NULL REFERENCES "salons"("id") ON DELETE CASCADE,
         "week_start" date NOT NULL,
         "retail_actual" numeric(12,2) NOT NULL,
-        "retail_target" numeric(12,2) NOT NULL,
-        "retail_target_reached" boolean NOT NULL,
+        "retail_target" numeric(12,2),
+        "retail_target_reached" boolean,
         "commission_retail" numeric(12,2) NOT NULL,
         "service_actual" numeric(12,2) NOT NULL,
-        "service_target" numeric(12,2) NOT NULL,
-        "service_target_reached" boolean NOT NULL,
+        "service_target" numeric(12,2),
+        "service_target_reached" boolean,
         "commission_service" numeric(12,2) NOT NULL,
         "total_commission" numeric(12,2) NOT NULL,
         "calculated_at" timestamptz NOT NULL DEFAULT now(),
@@ -296,27 +322,9 @@ export class InitSchema1700000000000 implements MigrationInterface {
         "sent_at" timestamptz NOT NULL
       )
     `);
-
-    // --- Fixed-salary roster deviation flags (§6.3, addition beyond §5) -----
-    await queryRunner.query(`
-      CREATE TABLE "flagged_weeks" (
-        "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        "employee_id" uuid NOT NULL REFERENCES "employees"("id") ON DELETE CASCADE,
-        "salon_id" uuid NOT NULL REFERENCES "salons"("id") ON DELETE CASCADE,
-        "week_start" date NOT NULL,
-        "contracted_hours" numeric(5,2) NOT NULL,
-        "scheduled_hours" numeric(5,2) NOT NULL,
-        "status" flagged_week_status_enum NOT NULL DEFAULT 'pending',
-        "reviewed_by" uuid REFERENCES "employees"("id") ON DELETE SET NULL,
-        "reviewed_at" timestamptz,
-        "created_at" timestamptz NOT NULL DEFAULT now(),
-        UNIQUE ("employee_id", "salon_id", "week_start")
-      )
-    `);
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`DROP TABLE "flagged_weeks"`);
     await queryRunner.query(`DROP TABLE "notification_log"`);
     await queryRunner.query(`DROP TABLE "notification_templates"`);
     await queryRunner.query(`DROP TABLE "employee_performance_tier"`);
@@ -333,17 +341,17 @@ export class InitSchema1700000000000 implements MigrationInterface {
     await queryRunner.query(`DROP TABLE "employee_pay"`);
     await queryRunner.query(`DROP TABLE "level_targets"`);
     await queryRunner.query(`DROP TABLE "employee_level_history"`);
-    await queryRunner.query(`DROP TABLE "employee_rates"`);
+    await queryRunner.query(`DROP TABLE "rate_card"`);
     await queryRunner.query(`DROP TABLE "employee_salon_assignments"`);
     await queryRunner.query(`DROP TABLE "employees"`);
     await queryRunner.query(`DROP TABLE "salons"`);
 
-    await queryRunner.query(`DROP TYPE "flagged_week_status_enum"`);
     await queryRunner.query(`DROP TYPE "notification_trigger_enum"`);
     await queryRunner.query(`DROP TYPE "pay_source_enum"`);
     await queryRunner.query(`DROP TYPE "day_type_enum"`);
+    await queryRunner.query(`DROP TYPE "rate_tier_enum"`);
     await queryRunner.query(`DROP TYPE "employee_level_enum"`);
-    await queryRunner.query(`DROP TYPE "pay_type_enum"`);
+    await queryRunner.query(`DROP TYPE "employment_type_enum"`);
     await queryRunner.query(`DROP TYPE "employee_role_enum"`);
   }
 }

@@ -1,4 +1,5 @@
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
@@ -6,14 +7,26 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
-import { EmployeeLevel, EmployeeRole, PayType } from './enums';
+import { EmployeeLevel, EmployeeRole, EmploymentType } from './enums';
 
-// §5 employees. Columns beyond the four listed in the spec code block are
-// additions required by other sections and are called out in the PR/summary:
-//  - first_name/last_name/email/phone/pin_hash: app-level PIN auth + SMS/email
-//    invitation on auto-onboarding (§2 "Authentification", §4.1 "Onboarding automatique")
-//  - contracted_hours_per_week: needed to detect fixed_salary deviations (§6.3)
+// §5 employees. Columns beyond id/simple_salon_id/xero_employee_id/role/
+// employment_type/level are additions required by other sections, called out
+// in the PR/summary: first_name/last_name/email/phone/pin_hash back the
+// app-level PIN auth + SMS/email invitation on auto-onboarding (§2
+// "Authentification", §4.1 "Onboarding automatique").
+//
+// pay_type (fixed_salary | hourly_variable) and contracted_hours_per_week
+// from the previous revision are DROPPED here: §4.3 replaces pay_type with
+// employment_type, and every employment_type now resolves to either an
+// hourly rate (contracted/casual, via rate_card) or a flat commission with
+// no target at all (freelancer) — there is no "fixed salary" case left to
+// flag deviations against. See PR summary for the reasoning; flag if this
+// call is wrong.
 @Entity('employees')
+@Check(
+  `("level" = 'head_stylist' AND "employment_type" = 'freelancer')
+   OR ("level" <> 'head_stylist' AND "employment_type" <> 'freelancer')`,
+)
 export class Employee {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -53,13 +66,15 @@ export class Employee {
   })
   role: EmployeeRole;
 
+  // §4.3 — contracted (hourly via rate_card) | casual (hourly, no target) |
+  // freelancer (all head_stylist, flat 40% commission, no rate at all).
   @Column({
-    name: 'pay_type',
+    name: 'employment_type',
     type: 'enum',
-    enum: PayType,
-    enumName: 'pay_type_enum',
+    enum: EmploymentType,
+    enumName: 'employment_type_enum',
   })
-  payType: PayType;
+  employmentType: EmploymentType;
 
   @Column({
     type: 'enum',
@@ -67,16 +82,6 @@ export class Employee {
     enumName: 'employee_level_enum',
   })
   level: EmployeeLevel;
-
-  // Only meaningful for pay_type = fixed_salary (§6.3).
-  @Column({
-    name: 'contracted_hours_per_week',
-    type: 'numeric',
-    precision: 5,
-    scale: 2,
-    nullable: true,
-  })
-  contractedHoursPerWeek: string | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;

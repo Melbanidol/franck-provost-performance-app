@@ -1,7 +1,7 @@
 export * from './salon.entity';
 export * from './employee.entity';
 export * from './employee-salon-assignment.entity';
-export * from './employee-rate.entity';
+export * from './rate-card.entity';
 export * from './employee-level-history.entity';
 export * from './level-target.entity';
 export * from './employee-pay.entity';
@@ -18,5 +18,4 @@ export * from './performance-tier.entity';
 export * from './employee-performance-tier.entity';
 export * from './notification-template.entity';
 export * from './notification-log.entity';
-export * from './flagged-week.entity';
 export * from './enums';

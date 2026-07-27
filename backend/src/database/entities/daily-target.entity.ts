@@ -54,12 +54,19 @@ export class DailyTarget {
   @Column({ name: 'weighted_hours', type: 'numeric', precision: 10, scale: 4 })
   weightedHours: string;
 
-  @Column({ name: 'daily_service_target', type: 'numeric', precision: 12, scale: 2 })
-  dailyServiceTarget: string;
+  // Null for casual/freelancer — no service_target to break down (§4.3)
+  @Column({
+    name: 'daily_service_target',
+    type: 'numeric',
+    precision: 12,
+    scale: 2,
+    nullable: true,
+  })
+  dailyServiceTarget: string | null;
 
-  // $14 × heures du jour — non pondéré (§6.4)
-  @Column({ name: 'daily_retail_target', type: 'numeric', precision: 12, scale: 2 })
-  dailyRetailTarget: string;
+  // $14 × heures du jour — non pondéré (§6.4). Null for freelancer (§4.3)
+  @Column({ name: 'daily_retail_target', type: 'numeric', precision: 12, scale: 2, nullable: true })
+  dailyRetailTarget: string | null;
 
   // Replaces the spec's `week_id` — see class comment.
   @Column({ name: 'week_start', type: 'date' })
