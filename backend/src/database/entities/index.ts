@@ -18,4 +18,5 @@ export * from './performance-tier.entity';
 export * from './employee-performance-tier.entity';
 export * from './notification-template.entity';
 export * from './notification-log.entity';
+export * from './flagged-week.entity';
 export * from './enums';

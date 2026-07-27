@@ -23,6 +23,7 @@ import {
   EmployeePerformanceTier,
   NotificationTemplate,
   NotificationLog,
+  FlaggedWeek,
 } from '../database/entities';
 
 dotenv.config();
@@ -58,6 +59,7 @@ export const AppDataSource = new DataSource({
     EmployeePerformanceTier,
     NotificationTemplate,
     NotificationLog,
+    FlaggedWeek,
   ],
   migrations: [join(__dirname, '..', 'database', 'migrations', '*.{ts,js}')],
   synchronize: false,

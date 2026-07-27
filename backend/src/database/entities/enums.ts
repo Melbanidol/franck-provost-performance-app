@@ -59,3 +59,8 @@ export enum NotificationTrigger {
   MILESTONE_CROSSED = 'milestone_crossed',
   WEEKLY_RECAP = 'weekly_recap',
 }
+
+export enum FlaggedWeekStatus {
+  PENDING = 'pending',
+  REVIEWED = 'reviewed',
+}

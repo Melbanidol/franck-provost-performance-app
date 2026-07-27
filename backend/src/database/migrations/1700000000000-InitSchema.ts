@@ -3,13 +3,13 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 // Initial schema for the Franck Provost performance app — implements every
 // table in spec §5 "Modèle de données" (as revised by the Career & Benefits
 // 2026 update: §4.3 employment_type/rate_card/public_holiday, §6.10 revised
-// multi-salon wage split), plus employee_level_history and a handful of
-// employee columns needed for auth/onboarding (documented in the entities
-// and in the PR/summary).
+// multi-salon wage split), plus employee_level_history, flagged_weeks, and a
+// handful of employee columns needed for auth/onboarding/contracted-hours
+// deviation flagging (documented in the entities and in the PR/summary).
 //
 // This branch has not been deployed anywhere yet, so this migration is
-// edited in place for the employment_type/rate_card revision rather than
-// layered under a second migration — there is no live schema to preserve.
+// edited in place for schema revisions rather than layered under additional
+// migrations — there is no live schema to preserve.
 export class InitSchema1700000000000 implements MigrationInterface {
   name = 'InitSchema1700000000000';
 
@@ -40,6 +40,9 @@ export class InitSchema1700000000000 implements MigrationInterface {
     await queryRunner.query(
       `CREATE TYPE "notification_trigger_enum" AS ENUM ('proximity_to_target', 'milestone_crossed', 'weekly_recap')`,
     );
+    await queryRunner.query(
+      `CREATE TYPE "flagged_week_status_enum" AS ENUM ('pending', 'reviewed')`,
+    );
 
     // --- Core: salons / employees -------------------------------------------
     await queryRunner.query(`
@@ -65,11 +68,15 @@ export class InitSchema1700000000000 implements MigrationInterface {
         "role" employee_role_enum NOT NULL DEFAULT 'stylist',
         "employment_type" employment_type_enum NOT NULL,
         "level" employee_level_enum NOT NULL,
+        "contracted_hours_per_week" numeric(5,2),
         "created_at" timestamptz NOT NULL DEFAULT now(),
         "updated_at" timestamptz NOT NULL DEFAULT now(),
         CONSTRAINT "chk_employees_head_stylist_is_freelancer" CHECK (
           ("level" = 'head_stylist' AND "employment_type" = 'freelancer')
           OR ("level" <> 'head_stylist' AND "employment_type" <> 'freelancer')
+        ),
+        CONSTRAINT "chk_employees_contracted_hours_only_for_contracted" CHECK (
+          "employment_type" = 'contracted' OR "contracted_hours_per_week" IS NULL
         )
       )
     `);
@@ -322,9 +329,28 @@ export class InitSchema1700000000000 implements MigrationInterface {
         "sent_at" timestamptz NOT NULL
       )
     `);
+
+    // --- Contracted-hours deviation flags (§6.3, addition beyond §5) --------
+    // No salon_id: the contract is at the employee level, so scheduled_hours
+    // is the sum across every salon worked that week (§6.10 multi-salon).
+    await queryRunner.query(`
+      CREATE TABLE "flagged_weeks" (
+        "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        "employee_id" uuid NOT NULL REFERENCES "employees"("id") ON DELETE CASCADE,
+        "week_start" date NOT NULL,
+        "contracted_hours" numeric(5,2) NOT NULL,
+        "scheduled_hours" numeric(5,2) NOT NULL,
+        "status" flagged_week_status_enum NOT NULL DEFAULT 'pending',
+        "reviewed_by" uuid REFERENCES "employees"("id") ON DELETE SET NULL,
+        "reviewed_at" timestamptz,
+        "created_at" timestamptz NOT NULL DEFAULT now(),
+        UNIQUE ("employee_id", "week_start")
+      )
+    `);
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    await queryRunner.query(`DROP TABLE "flagged_weeks"`);
     await queryRunner.query(`DROP TABLE "notification_log"`);
     await queryRunner.query(`DROP TABLE "notification_templates"`);
     await queryRunner.query(`DROP TABLE "employee_performance_tier"`);
@@ -346,6 +372,7 @@ export class InitSchema1700000000000 implements MigrationInterface {
     await queryRunner.query(`DROP TABLE "employees"`);
     await queryRunner.query(`DROP TABLE "salons"`);
 
+    await queryRunner.query(`DROP TYPE "flagged_week_status_enum"`);
     await queryRunner.query(`DROP TYPE "notification_trigger_enum"`);
     await queryRunner.query(`DROP TYPE "pay_source_enum"`);
     await queryRunner.query(`DROP TYPE "day_type_enum"`);
