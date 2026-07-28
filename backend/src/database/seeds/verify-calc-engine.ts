@@ -288,12 +288,19 @@ async function main() {
 
   console.log('\n=== Scenario C: freelancer ===');
   {
-    const [kpi] = await dataSource.query(
+    // Confirmed: freelancers get no targets of any kind — no kpi_targets
+    // row at all (not even one with every field null).
+    const kpiRows = await dataSource.query(
       `SELECT * FROM kpi_targets WHERE employee_id = $1 AND salon_id = $2`,
       [empC, salonA],
     );
-    assertNull('C service_target', kpi.service_target);
-    assertNull('C retail_target', kpi.retail_target);
+    assertEqual('C no kpi_targets row at all', kpiRows.length, 0);
+
+    const dailyRows = await dataSource.query(
+      `SELECT * FROM daily_targets WHERE employee_id = $1 AND salon_id = $2`,
+      [empC, salonA],
+    );
+    assertEqual('C no daily_targets rows at all', dailyRows.length, 0);
 
     const [commission] = await dataSource.query(
       `SELECT * FROM employee_commissions WHERE employee_id = $1 AND salon_id = $2`,

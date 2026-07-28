@@ -9,6 +9,7 @@ import {
   computeRetailTarget,
   computeServiceTarget,
   computeWeightedWageForSalon,
+  hasAnyTargets,
   hasRetailTarget,
   hasServiceTarget,
   RateCardLookup,
@@ -54,6 +55,14 @@ export class KpiTargetService {
       formulaSettings,
       avgSpendTarget,
     } = params;
+
+    // Freelancers have no targets of any kind (confirmed — MVP is scoped to
+    // contracted employees). No kpi_targets/daily_targets row is written at
+    // all; they still earn commissions via CommissionService, just against
+    // null targets (flat, no threshold).
+    if (!hasAnyTargets(employee.employmentType)) {
+      return { serviceTarget: null, retailTarget: null };
+    }
 
     const totalHours = days.reduce((sum, d) => sum + d.hoursScheduled, 0);
 
