@@ -153,17 +153,33 @@ export class InitSchema1700000000000 implements MigrationInterface {
       )
     `);
 
+    // Simple Salon's own "Roster Types" admin config (Rostered ON, Sick,
+    // Public Holiday, Training, Franchisees Meeting, ...) — one flag drives
+    // everything downstream: is_paid = true counts toward the wage-based
+    // service_target, the retail_target, and the contracted-hours quota
+    // check alike (confirmed simple on purpose).
+    await queryRunner.query(`
+      CREATE TABLE "roster_types" (
+        "name" varchar(64) PRIMARY KEY,
+        "is_paid" boolean NOT NULL
+      )
+    `);
+
+    // One row per roster BLOCK, not per day — a day can mix roster_types
+    // (e.g. half-day Annual Leave + half-day Rostered ON), so the unique key
+    // includes roster_type rather than being one row per date.
     await queryRunner.query(`
       CREATE TABLE "roster_hours" (
         "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         "employee_id" uuid NOT NULL REFERENCES "employees"("id") ON DELETE CASCADE,
         "salon_id" uuid NOT NULL REFERENCES "salons"("id") ON DELETE CASCADE,
         "date" date NOT NULL,
+        "roster_type" varchar(64) NOT NULL REFERENCES "roster_types"("name"),
         "day_type" day_type_enum NOT NULL,
         "hours_scheduled" numeric(5,2) NOT NULL,
         "created_at" timestamptz NOT NULL DEFAULT now(),
         "updated_at" timestamptz NOT NULL DEFAULT now(),
-        UNIQUE ("employee_id", "salon_id", "date")
+        UNIQUE ("employee_id", "salon_id", "date", "roster_type")
       )
     `);
 
@@ -364,6 +380,7 @@ export class InitSchema1700000000000 implements MigrationInterface {
     await queryRunner.query(`DROP TABLE "daily_targets"`);
     await queryRunner.query(`DROP TABLE "kpi_targets"`);
     await queryRunner.query(`DROP TABLE "roster_hours"`);
+    await queryRunner.query(`DROP TABLE "roster_types"`);
     await queryRunner.query(`DROP TABLE "employee_pay"`);
     await queryRunner.query(`DROP TABLE "level_targets"`);
     await queryRunner.query(`DROP TABLE "employee_level_history"`);

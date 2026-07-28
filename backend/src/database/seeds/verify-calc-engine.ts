@@ -91,11 +91,12 @@ async function main() {
     date: string,
     dayType: string,
     hours: number,
+    rosterType = 'Rostered ON',
   ): Promise<void> {
     await dataSource.query(
-      `INSERT INTO roster_hours (employee_id, salon_id, date, day_type, hours_scheduled)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [employeeId, salonId, date, dayType, hours],
+      `INSERT INTO roster_hours (employee_id, salon_id, date, roster_type, day_type, hours_scheduled)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [employeeId, salonId, date, rosterType, dayType, hours],
     );
   }
 
@@ -192,7 +193,26 @@ async function main() {
   await roster(empE, salonB, '2026-08-06', 'weekday', 5);
   // 24h primary + 5h secondary = 29h total -> matches contract, no deviation
 
-  for (const employeeId of [empA, empB, empC, empD, empE]) {
+  // --- Scenario F: mixed paid/unpaid roster_type blocks in the same week ---
+  const empF = await insertEmployee({
+    firstName: 'F',
+    lastName: 'MixedRosterTypes',
+    employmentType: 'contracted',
+    level: 'advanced_senior_stylist',
+    contractedHours: 14,
+  });
+  await assign(empF, salonA, true);
+  // Wed: two paid blocks, same day, different roster_type -> should sum to 8h
+  await roster(empF, salonA, '2026-08-05', 'weekday', 4, 'Rostered ON');
+  await roster(empF, salonA, '2026-08-05', 'weekday', 4, 'Training');
+  // Thu: one paid block (6h) + one unpaid block (3h Home Office) -> only 6h should count
+  await roster(empF, salonA, '2026-08-06', 'weekday', 6, 'Rostered ON');
+  await roster(empF, salonA, '2026-08-06', 'weekday', 3, 'Home Office');
+  // Fri: fully unpaid day -> should not appear in targets/daily_targets at all
+  await roster(empF, salonA, '2026-08-07', 'weekday', 5, 'Home Office');
+  // total PAID hours = 8 (Wed) + 6 (Thu) + 0 (Fri) = 14h -> matches 14h contract, no deviation
+
+  for (const employeeId of [empA, empB, empC, empD, empE, empF]) {
     await calcEngine.recalculateEmployeeWeek(employeeId, WEEK_START);
   }
 
@@ -317,6 +337,33 @@ async function main() {
 
     const flagRows = await dataSource.query(`SELECT * FROM flagged_weeks WHERE employee_id = $1`, [empE]);
     assertEqual('E no flag (24h primary + 5h secondary = 29h contract)', flagRows.length, 0);
+  }
+
+  console.log('\n=== Scenario F: mixed paid/unpaid roster_type blocks ===');
+  {
+    const [kpi] = await dataSource.query(
+      `SELECT * FROM kpi_targets WHERE employee_id = $1 AND salon_id = $2`,
+      [empF, salonA],
+    );
+    // paid hours only: 8h (Wed) + 6h (Thu) = 14h weekday, advanced_senior rate 30.50
+    // weighted_wage = 14 * 30.50 = 427; service_target = 427 * 1.2 * 3 = 1537.2
+    assertClose('F service_target (unpaid hours excluded)', kpi.service_target, 1537.2);
+    // retail_target = 14h * 14 = 196 (unpaid hours excluded here too)
+    assertClose('F retail_target (unpaid hours excluded)', kpi.retail_target, 196);
+
+    const dailyRows: { date: string; hours_scheduled: string }[] = await dataSource.query(
+      `SELECT to_char(date, 'YYYY-MM-DD') AS date, hours_scheduled FROM daily_targets
+       WHERE employee_id = $1 AND salon_id = $2 ORDER BY date`,
+      [empF, salonA],
+    );
+    assertEqual('F daily_targets row count (Fri fully unpaid -> no row)', dailyRows.length, 2);
+    const wed = dailyRows.find((r) => r.date === '2026-08-05');
+    const thu = dailyRows.find((r) => r.date === '2026-08-06');
+    assertClose('F Wed hours (Rostered ON 4h + Training 4h summed)', wed?.hours_scheduled, 8);
+    assertClose('F Thu hours (Home Office 3h excluded)', thu?.hours_scheduled, 6);
+
+    const flagRows = await dataSource.query(`SELECT * FROM flagged_weeks WHERE employee_id = $1`, [empF]);
+    assertEqual('F no flag (14h paid matches 14h contract, unpaid Fri correctly excluded)', flagRows.length, 0);
   }
 
   console.log('\nAll calc engine integration checks passed.');

@@ -105,4 +105,42 @@ export async function seedReferenceData(dataSource: DataSource): Promise<void> {
       [row.tierNumber, row.thresholdPct],
     );
   }
+
+  // Simple Salon's own "Roster Types" (§4.1 roster sync) — confirmed which
+  // are paid. Paid = counts toward service_target/retail_target/contracted-
+  // hours quota alike; unpaid blocks are still synced into roster_hours for
+  // a full record, they just never reach the calc engine.
+  const rosterTypes: { name: string; isPaid: boolean }[] = [
+    { name: 'Rostered ON', isPaid: true },
+    { name: 'Sick', isPaid: true },
+    { name: 'Public Holiday', isPaid: true },
+    { name: 'Annual Leave', isPaid: true },
+    { name: 'TAFE', isPaid: false },
+    { name: 'Training', isPaid: true },
+    { name: 'Compassionate Leave', isPaid: true },
+    { name: 'Customer Service', isPaid: false },
+    { name: 'Events/Wellness Circle', isPaid: false },
+    { name: 'FP Team Day', isPaid: true },
+    { name: 'Franchisees Meeting', isPaid: false },
+    { name: 'Home Office', isPaid: false },
+    { name: 'Jury duty', isPaid: true },
+    { name: 'Lunch', isPaid: false },
+    { name: 'Manager Meeting (15 min)', isPaid: true },
+    { name: 'Manager Meeting (420 min)', isPaid: true },
+    { name: 'Maternity', isPaid: false },
+    { name: 'Rostered OFF', isPaid: false },
+    { name: 'TCU', isPaid: true },
+    { name: 'Time Owed', isPaid: false },
+    { name: 'Unpaid Leave', isPaid: false },
+    { name: 'Unpaid Training', isPaid: false },
+    { name: 'Wellbeing Day', isPaid: true },
+  ];
+  for (const row of rosterTypes) {
+    await dataSource.query(
+      `INSERT INTO "roster_types" ("name", "is_paid")
+       VALUES ($1, $2)
+       ON CONFLICT ("name") DO UPDATE SET "is_paid" = EXCLUDED."is_paid"`,
+      [row.name, row.isPaid],
+    );
+  }
 }

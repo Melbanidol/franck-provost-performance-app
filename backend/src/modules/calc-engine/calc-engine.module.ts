@@ -14,6 +14,7 @@ import {
   LevelTarget,
   PerformanceTier,
   RateCard,
+  RosterType,
   RosterHour,
 } from '../../database/entities';
 import { CalcEngineService } from './calc-engine.service';
@@ -31,6 +32,7 @@ import { RosterWeekService } from './services/roster-week.service';
       Employee,
       EmployeeSalonAssignment,
       EmployeeLevelHistory,
+      RosterType,
       RosterHour,
       RateCard,
       FormulaSetting,

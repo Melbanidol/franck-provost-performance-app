@@ -5,6 +5,7 @@ export * from './rate-card.entity';
 export * from './employee-level-history.entity';
 export * from './level-target.entity';
 export * from './employee-pay.entity';
+export * from './roster-type.entity';
 export * from './roster-hour.entity';
 export * from './kpi-target.entity';
 export * from './daily-target.entity';
