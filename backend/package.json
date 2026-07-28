@@ -11,7 +11,9 @@
     "migration:run": "npm run typeorm -- migration:run",
     "migration:revert": "npm run typeorm -- migration:revert",
     "migration:generate": "npm run typeorm -- migration:generate",
-    "seed": "ts-node -r tsconfig-paths/register src/database/seeds/run-seeds.ts"
+    "seed": "ts-node -r tsconfig-paths/register src/database/seeds/run-seeds.ts",
+    "test": "jest",
+    "verify:calc-engine": "ts-node -r tsconfig-paths/register src/database/seeds/verify-calc-engine.ts"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.0",
@@ -26,10 +28,20 @@
     "typeorm": "^0.3.20"
   },
   "devDependencies": {
+    "@types/jest": "^29.5.12",
     "@types/node": "^20.14.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.5.0"
+  },
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/*.spec.ts"
+    ]
   }
 }
