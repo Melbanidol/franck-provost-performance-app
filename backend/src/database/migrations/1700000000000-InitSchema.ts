@@ -363,9 +363,28 @@ export class InitSchema1700000000000 implements MigrationInterface {
         UNIQUE ("employee_id", "week_start")
       )
     `);
+
+    // Xero Payroll AU OAuth2 connection state — not part of §5, see
+    // xero-connection.entity.ts. No FK to anything else, so it can be
+    // created/dropped independently of the rest of the schema.
+    await queryRunner.query(`
+      CREATE TABLE "xero_connections" (
+        "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        "tenant_id" varchar(64) NOT NULL,
+        "tenant_name" varchar(255),
+        "access_token" text NOT NULL,
+        "refresh_token" text NOT NULL,
+        "expires_at" timestamptz NOT NULL,
+        "scope" text NOT NULL,
+        "created_at" timestamptz NOT NULL DEFAULT now(),
+        "updated_at" timestamptz NOT NULL DEFAULT now(),
+        UNIQUE ("tenant_id")
+      )
+    `);
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    await queryRunner.query(`DROP TABLE "xero_connections"`);
     await queryRunner.query(`DROP TABLE "flagged_weeks"`);
     await queryRunner.query(`DROP TABLE "notification_log"`);
     await queryRunner.query(`DROP TABLE "notification_templates"`);

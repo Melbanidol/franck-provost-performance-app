@@ -25,6 +25,7 @@ import {
   NotificationTemplate,
   NotificationLog,
   FlaggedWeek,
+  XeroConnection,
 } from '../database/entities';
 
 dotenv.config();
@@ -62,6 +63,7 @@ export const AppDataSource = new DataSource({
     NotificationTemplate,
     NotificationLog,
     FlaggedWeek,
+    XeroConnection,
   ],
   migrations: [join(__dirname, '..', 'database', 'migrations', '*.{ts,js}')],
   synchronize: false,
