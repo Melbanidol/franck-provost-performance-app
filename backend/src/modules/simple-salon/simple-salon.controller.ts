@@ -14,10 +14,10 @@ export class SimpleSalonController {
   // Confirms required env vars are present — no live API call, so this
   // always works even before the endpoint paths are verified.
   @Get('status')
-  status(): { configured: boolean; missing: string[]; rosterPath: string } {
+  status(): { configured: boolean; missing: string[] } {
     const required = ['SIMPLE_SALON_API_URL', 'SIMPLE_SALON_TOKEN', 'SIMPLE_SALON_SIGN_KEY'];
     const missing = required.filter((key) => !this.config.get<string>(key));
-    return { configured: missing.length === 0, missing, rosterPath: this.apiClient.rosterPath };
+    return { configured: missing.length === 0, missing };
   }
 
   // Diagnostic — deliberately kept as a browser-pasteable GET even though

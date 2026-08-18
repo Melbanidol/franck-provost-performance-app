@@ -22,9 +22,14 @@ import { createHmac } from 'crypto';
 //     expiry. Falls back to a full re-login if refresh fails (per docs: an
 //     expired-and-long-unused token may need a fresh login regardless).
 //
-// What's still UNCONFIRMED: the exact endpoint path(s) and response shape
-// for rosters/appointments/performance data — see roster-sync service and
-// SIMPLE_SALON_ROSTER_PATH.
+// The roster endpoints (POST /v1/roster/list, POST /v1/roster_type/list) are
+// now also confirmed against the docs — see simple-salon-roster-sync.service.ts.
+// Still unconfirmed: whether options.expanded_fields:["roster_type"] actually
+// embeds the roster_type object on /v1/roster/list (the docs show that
+// pattern for a sibling endpoint, Roster Rates, but not spelled out for
+// Rosters itself) — handled defensively either way, see that file. Also
+// still open: performance/appointments/POS endpoints for the future
+// daily_performance sync (task #18) haven't been looked at yet.
 // ---------------------------------------------------------------------------
 
 interface LoginResponse {
@@ -68,11 +73,6 @@ export class SimpleSalonApiClient {
       this.config.get<string>('SIMPLE_SALON_USER_AGENT') ??
       'FranckProvostPerformanceApp/0.1 (NestJS backend)'
     );
-  }
-
-  // Still unconfirmed — see file header and roster-sync service.
-  get rosterPath(): string {
-    return this.config.get<string>('SIMPLE_SALON_ROSTER_PATH') ?? '/v1/roster/list';
   }
 
   private requireEnv(key: string): string {

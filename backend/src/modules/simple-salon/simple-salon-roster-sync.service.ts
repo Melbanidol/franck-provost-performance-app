@@ -10,19 +10,41 @@ import {
 import { DayType } from '../../database/entities/enums';
 import { SimpleSalonApiClient } from './simple-salon-api.client';
 
+// Real shape, confirmed against api.simplesalon.com/docs/v1 (Rosters >
+// Models). duration is in minutes; time_start/time_end are full ISO
+// datetimes (not separate date+hours). roster_type may or may not be
+// embedded depending on whether the expanded_fields request option is
+// honoured — see fetchRosterTypeNamesById() below, which resolves the name
+// independently either way.
+interface SimpleSalonRoster {
+  roster_id: number;
+  company_id: number;
+  operator_id: number;
+  duration: number;
+  time_start: string;
+  time_end: string;
+  roster_type_id: number;
+  roster_type?: { roster_type_id: number; name: string };
+}
+
+interface SimpleSalonRosterType {
+  roster_type_id: number;
+  name: string;
+}
+
 interface NormalizedRosterEntry {
-  simpleSalonEmployeeId: string;
-  date: string; // YYYY-MM-DD
+  simpleSalonOperatorId: string;
+  date: string; // YYYY-MM-DD, derived from time_start
   rosterTypeName: string;
-  hours: number;
+  hours: number; // duration minutes / 60
 }
 
 export interface RosterSyncResult {
   entriesReceived: number;
   written: number;
-  unmatchedEmployees: string[]; // simple_salon_id values with no local employee
+  unmatchedEmployees: string[]; // operator_id values with no local employee
   unmappedRosterTypes: string[]; // Simple Salon roster type names not in our 23
-  unparsable: number; // raw entries that didn't even have the fields we look for
+  unparsable: number; // raw entries missing a resolvable roster_type name
 }
 
 const STALE_ASSIGNMENT_DAYS = 30;
@@ -31,16 +53,15 @@ const STALE_ASSIGNMENT_DAYS = 30;
 // employee_salon_assignments current (is_active / first_seen / last_seen).
 //
 // Deliberately does NOT auto-create Employee rows for an unmatched
-// simple_salon_id, even though the schema comment on employees.simple_salon_id
+// operator_id, even though the schema comment on employees.simple_salon_id
 // anticipates that eventually happening ("nullable until the first roster
 // sync creates the employee"). employment_type and level are NOT NULL with a
 // CHECK constraint tying level='head_stylist' to employment_type='freelancer'
 // — there's no way to infer either safely from a roster feed alone, and
 // guessing would silently corrupt wage/target calculations for that person.
 // Unmatched entries are surfaced in the sync result instead, for a manager
-// to link manually (or for a future onboarding flow to prompt for the
-// missing fields). This mirrors the same conservative choice already made
-// for the Xero Payroll integration (see xero-payroll.service.ts).
+// to link manually. Mirrors the same conservative choice already made for
+// the Xero Payroll integration (see xero-payroll.service.ts).
 @Injectable()
 export class SimpleSalonRosterSyncService {
   private readonly logger = new Logger(SimpleSalonRosterSyncService.name);
@@ -57,33 +78,49 @@ export class SimpleSalonRosterSyncService {
   async syncRosterForSalon(params: {
     companyId: string;
     salonId: string;
-    dateFrom: string;
-    dateTo: string;
+    dateFrom: string; // YYYY-MM-DD, inclusive
+    dateTo: string; // YYYY-MM-DD, exclusive per Simple Salon's time_end semantics
   }): Promise<RosterSyncResult> {
     const { companyId, salonId, dateFrom, dateTo } = params;
 
-    // Body param names (date_from/date_to vs dateFrom/dateTo etc.) are still
-    // unconfirmed — see file header in simple-salon-api.client.ts. Sending
-    // both common conventions costs nothing and the API should just ignore
-    // whichever one it doesn't recognise.
-    const raw = await this.apiClient.post(companyId, this.apiClient.rosterPath, {
-      date_from: dateFrom,
-      date_to: dateTo,
-      dateFrom,
-      dateTo,
+    // POST /v1/roster/list — confirmed shape (docs: Rosters > List).
+    // exclude_dome + company_id scope strictly to this one company even when
+    // logged in via a Dome account. rows_per_page: -1 returns everything for
+    // a single-week-or-less range without pagination (per docs).
+    const raw = await this.apiClient.post<{ rosters: SimpleSalonRoster[] }>(companyId, '/v1/roster/list', {
+      filters: {
+        time_start: `${dateFrom}T00:00:00+00:00`,
+        time_end: `${dateTo}T00:00:00+00:00`,
+        company_id: Number(companyId),
+        exclude_dome: true,
+      },
+      options: {
+        rows_per_page: -1,
+        expanded_fields: ['roster_type'],
+      },
     });
-    const rawEntries = this.unwrapEntries(raw);
+    const rawRosters = raw.rosters ?? [];
+
+    const rosterTypeNamesById = await this.fetchRosterTypeNamesById(companyId);
 
     const normalized: NormalizedRosterEntry[] = [];
     let unparsable = 0;
-    for (const entry of rawEntries) {
-      const mapped = this.mapRosterEntry(entry);
-      if (mapped) normalized.push(mapped);
-      else unparsable++;
+    for (const roster of rawRosters) {
+      const rosterTypeName = roster.roster_type?.name ?? rosterTypeNamesById.get(roster.roster_type_id);
+      if (!rosterTypeName || !roster.time_start || !roster.operator_id) {
+        unparsable++;
+        continue;
+      }
+      normalized.push({
+        simpleSalonOperatorId: String(roster.operator_id),
+        date: roster.time_start.slice(0, 10),
+        rosterTypeName,
+        hours: roster.duration / 60,
+      });
     }
     if (unparsable > 0) {
       this.logger.warn(
-        `${unparsable}/${rawEntries.length} Simple Salon roster entries didn't match any of the guessed field names — see mapRosterEntry() in this file and GET /simple-salon/raw to inspect the real shape.`,
+        `${unparsable}/${rawRosters.length} Simple Salon rosters had no resolvable roster_type name or missing operator_id/time_start.`,
       );
     }
 
@@ -100,9 +137,9 @@ export class SimpleSalonRosterSyncService {
     let written = 0;
 
     for (const entry of normalized) {
-      const employee = employeesBySimpleSalonId.get(entry.simpleSalonEmployeeId);
+      const employee = employeesBySimpleSalonId.get(entry.simpleSalonOperatorId);
       if (!employee) {
-        unmatchedEmployees.add(entry.simpleSalonEmployeeId);
+        unmatchedEmployees.add(entry.simpleSalonOperatorId);
         continue;
       }
       if (!validRosterTypeNames.has(entry.rosterTypeName)) {
@@ -137,7 +174,7 @@ export class SimpleSalonRosterSyncService {
     await this.updateAssignments(salonId, dateRangeByEmployee);
 
     return {
-      entriesReceived: rawEntries.length,
+      entriesReceived: rawRosters.length,
       written,
       unmatchedEmployees: [...unmatchedEmployees],
       unmappedRosterTypes: [...unmappedRosterTypes],
@@ -184,6 +221,19 @@ export class SimpleSalonRosterSyncService {
     }
   }
 
+  // Fallback name resolution for when a roster entry only carries
+  // roster_type_id (i.e. expanded_fields wasn't honoured). One extra call
+  // per sync, not per roster — POST /v1/roster_type/list, confirmed shape
+  // (docs: Roster Types > Models).
+  private async fetchRosterTypeNamesById(companyId: string): Promise<Map<number, string>> {
+    const raw = await this.apiClient.post<{ roster_types: SimpleSalonRosterType[] }>(
+      companyId,
+      '/v1/roster_type/list',
+      { filters: { company_id: Number(companyId) }, options: { rows_per_page: -1 } },
+    );
+    return new Map((raw.roster_types ?? []).map((rt) => [rt.roster_type_id, rt.name]));
+  }
+
   // weekday/saturday/sunday from the calendar date, overridden to
   // public_holiday when Simple Salon itself labelled the block "Public
   // Holiday" (one of the 23 seeded roster_types). There's no public-holiday
@@ -196,55 +246,5 @@ export class SimpleSalonRosterSyncService {
     if (day === 0) return DayType.SUNDAY;
     if (day === 6) return DayType.SATURDAY;
     return DayType.WEEKDAY;
-  }
-
-  // Unwraps whatever envelope Simple Salon puts the array in. Real shape
-  // unverified — see file header note in simple-salon-api.client.ts. Tries
-  // the response itself first (already an array), then the most likely
-  // wrapper key names.
-  private unwrapEntries(raw: unknown): unknown[] {
-    if (Array.isArray(raw)) return raw;
-    if (raw && typeof raw === 'object') {
-      for (const key of ['data', 'Data', 'Roster', 'Rosters', 'results', 'Results', 'items', 'Items']) {
-        const value = (raw as Record<string, unknown>)[key];
-        if (Array.isArray(value)) return value;
-      }
-    }
-    this.logger.warn('Could not find an array of roster entries in the Simple Salon response — got: ' + JSON.stringify(raw).slice(0, 500));
-    return [];
-  }
-
-  // Best-guess field names — see file header note in simple-salon-api.client.ts.
-  // Returns null (rather than throwing) for anything that doesn't have at
-  // least an employee id, a date, a roster type, and hours under one of the
-  // guessed names, so one malformed entry doesn't abort the whole sync.
-  private mapRosterEntry(entry: unknown): NormalizedRosterEntry | null {
-    if (!entry || typeof entry !== 'object') return null;
-    const e = entry as Record<string, unknown>;
-
-    const employeeId = this.firstString(e, ['EmployeeID', 'EmployeeId', 'StaffID', 'StaffId', 'OperatorID']);
-    const date = this.firstString(e, ['Date', 'RosterDate', 'ShiftDate']);
-    const rosterTypeName = this.firstString(e, ['RosterType', 'ShiftType', 'Type', 'RosterTypeName']);
-    const hours = this.firstNumber(e, ['Hours', 'HoursScheduled', 'Duration', 'ScheduledHours']);
-
-    if (!employeeId || !date || !rosterTypeName || hours === null) return null;
-    return { simpleSalonEmployeeId: employeeId, date: date.slice(0, 10), rosterTypeName, hours };
-  }
-
-  private firstString(obj: Record<string, unknown>, keys: string[]): string | null {
-    for (const key of keys) {
-      const value = obj[key];
-      if (typeof value === 'string' && value.length > 0) return value;
-    }
-    return null;
-  }
-
-  private firstNumber(obj: Record<string, unknown>, keys: string[]): number | null {
-    for (const key of keys) {
-      const value = obj[key];
-      if (typeof value === 'number') return value;
-      if (typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Number(value))) return Number(value);
-    }
-    return null;
   }
 }
