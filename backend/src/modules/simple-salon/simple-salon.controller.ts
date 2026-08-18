@@ -12,7 +12,7 @@ export class SimpleSalonController {
   ) {}
 
   // Confirms required env vars are present — no live API call, so this
-  // always works even before the auth scheme / endpoint paths are verified.
+  // always works even before the endpoint paths are verified.
   @Get('status')
   status(): { configured: boolean; missing: string[]; rosterPath: string } {
     const required = ['SIMPLE_SALON_API_URL', 'SIMPLE_SALON_TOKEN', 'SIMPLE_SALON_SIGN_KEY'];
@@ -20,10 +20,14 @@ export class SimpleSalonController {
     return { configured: missing.length === 0, missing, rosterPath: this.apiClient.rosterPath };
   }
 
-  // Diagnostic — hits any path on the Simple Salon sandbox with our
-  // best-guess auth headers and returns the raw response untouched. Use
-  // this FIRST, before trusting anything in simple-salon-roster-sync.service.ts.
-  // Example: GET /simple-salon/raw?companyId=40552&path=/api/v1/roster&dateFrom=2026-08-03&dateTo=2026-08-09
+  // Diagnostic — deliberately kept as a browser-pasteable GET even though
+  // Simple Salon's real API is POST/RPC-style throughout: this logs in for
+  // the given company, then issues a real POST to `path` with the other
+  // query params (minus companyId/path themselves) forwarded as the JSON
+  // body, and returns the raw response untouched. Use this to confirm the
+  // real roster/appointments endpoint path and field names before trusting
+  // anything in simple-salon-roster-sync.service.ts.
+  // Example: GET /simple-salon/raw?companyId=40552&path=/v1/roster/list&dateFrom=2026-08-03&dateTo=2026-08-09
   @Get('raw')
   async raw(
     @Query('companyId') companyId: string,
@@ -31,9 +35,9 @@ export class SimpleSalonController {
     @Query() allQuery: Record<string, string>,
   ) {
     if (!companyId) throw new BadRequestException('companyId query param is required');
-    if (!path) throw new BadRequestException('path query param is required, e.g. /api/v1/roster');
-    const { companyId: _c, path: _p, ...forwardedQuery } = allQuery;
-    return this.apiClient.rawGet(companyId, path, forwardedQuery);
+    if (!path) throw new BadRequestException('path query param is required, e.g. /v1/roster/list');
+    const { companyId: _c, path: _p, ...body } = allQuery;
+    return this.apiClient.rawPost(companyId, path, body);
   }
 
   // Real sync — only writes roster_hours for employees already matched

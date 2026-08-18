@@ -1,39 +1,61 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHmac } from 'crypto';
 
 // ---------------------------------------------------------------------------
-// IMPORTANT — read before touching auth or endpoint paths in this file.
+// Auth flow confirmed against the real Simple Salon API docs
+// (api.simplesalon.com/docs/v1 — "Initial Setup" and "Authentication"
+// sections). Everything in this file now follows a verified contract, not a
+// guess:
 //
-// This client has never completed a real call against the Simple Salon
-// sandbox. All we have to go on is the credentials email (§ Simple Salon
-// sandbox): a base URL, a "Token", and a "Sign Key" — no endpoint reference,
-// no auth scheme documentation, no example request. Everything below —
-// the request-signing scheme, the header names, and the default roster
-// endpoint path — is a best-effort guess based on common patterns for this
-// class of API (token + HMAC-signed request), NOT a verified contract.
+//  1. Company Token (computed once per company, not per request):
+//     hex(HMAC-SHA256(signKey, `${partnerToken}-${companyId}`))
+//  2. Login: POST {SIMPLE_SALON_API_URL}/v1/login
+//       headers: Content-Type, User-Agent, X-Company-Token, X-Partner-Token
+//       body: { username, password, company_id }
+//     → { success, token, api_url, expiry, operator, ... }
+//  3. Every other call: POST {api_url}/v1/{method} with
+//       header Authorization: Bearer {token}
+//     — this API is POST/RPC-style throughout (even "get" endpoints), not
+//     REST-with-query-params, per every example in the docs.
+//  4. Refresh: POST {api_url}/v1/refresh with { token } → new token/api_url/
+//     expiry. Falls back to a full re-login if refresh fails (per docs: an
+//     expired-and-long-unused token may need a fresh login regardless).
 //
-// Two things are deliberately built to make correcting those guesses cheap
-// once real sandbox responses are available:
-//  - buildAuthHeaders() is the ONLY place the auth scheme lives.
-//  - the roster endpoint path is a runtime setting (SIMPLE_SALON_ROSTER_PATH),
-//    not hardcoded, and SimpleSalonController#rawGet lets you probe arbitrary
-//    paths against the sandbox without a code change.
-// Use GET /simple-salon/raw?path=... first, confirm what actually comes
-// back, then fix this file if the guesses were wrong.
+// What's still UNCONFIRMED: the exact endpoint path(s) and response shape
+// for rosters/appointments/performance data — see roster-sync service and
+// SIMPLE_SALON_ROSTER_PATH.
 // ---------------------------------------------------------------------------
 
-const DEFAULT_ROSTER_PATH = '/api/v1/roster';
+interface LoginResponse {
+  success: boolean;
+  token: string;
+  api_url: string;
+  expiry: string;
+  operator?: unknown;
+  login_notice?: unknown;
+}
+
+interface SimpleSalonSession {
+  token: string;
+  apiUrl: string;
+  expiresAt: Date;
+}
+
+const REFRESH_SKEW_MS = 60_000;
 
 @Injectable()
 export class SimpleSalonApiClient {
+  private readonly logger = new Logger(SimpleSalonApiClient.name);
+  private readonly sessions = new Map<string, SimpleSalonSession>();
+
   constructor(private readonly config: ConfigService) {}
 
   private get baseUrl(): string {
     return this.requireEnv('SIMPLE_SALON_API_URL');
   }
 
-  private get token(): string {
+  private get partnerToken(): string {
     return this.requireEnv('SIMPLE_SALON_TOKEN');
   }
 
@@ -41,8 +63,16 @@ export class SimpleSalonApiClient {
     return this.requireEnv('SIMPLE_SALON_SIGN_KEY');
   }
 
+  private get userAgent(): string {
+    return (
+      this.config.get<string>('SIMPLE_SALON_USER_AGENT') ??
+      'FranckProvostPerformanceApp/0.1 (NestJS backend)'
+    );
+  }
+
+  // Still unconfirmed — see file header and roster-sync service.
   get rosterPath(): string {
-    return this.config.get<string>('SIMPLE_SALON_ROSTER_PATH') ?? DEFAULT_ROSTER_PATH;
+    return this.config.get<string>('SIMPLE_SALON_ROSTER_PATH') ?? '/v1/roster/list';
   }
 
   private requireEnv(key: string): string {
@@ -53,48 +83,115 @@ export class SimpleSalonApiClient {
     return value;
   }
 
-  // Best-effort guess: token + timestamp signed with the sign key via
-  // HMAC-SHA256, sent as two headers alongside the timestamp. Common shape
-  // for this style of API, but UNVERIFIED — see file header.
-  private buildAuthHeaders(companyId: string): Record<string, string> {
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-    const signature = createHmac('sha256', this.signKey).update(`${this.token}:${timestamp}`).digest('hex');
-    return {
-      'X-API-Token': this.token,
-      'X-API-Timestamp': timestamp,
-      'X-API-Signature': signature,
-      'X-Company-Id': companyId,
-      Accept: 'application/json',
-    };
+  // Docs: "Initial Setup > For Partners > Generating a Company Token" —
+  // combine Partner Token + Company ID with a dash, HMAC-SHA256 it with the
+  // Signing Key (UTF8), hex digest (already lowercase alphanumeric, matches
+  // the doc's stated requirement).
+  private computeCompanyToken(companyId: string): string {
+    return createHmac('sha256', this.signKey).update(`${this.partnerToken}-${companyId}`, 'utf8').digest('hex');
   }
 
-  // Fetches whatever path you give it, with our best-guess auth headers
-  // attached, and returns the raw status + body untouched. Use this to
-  // probe the real API before trusting any mapping in
-  // simple-salon-roster-sync.service.ts.
-  async rawGet(
+  // Resolves username/password for a companyId from the 3 sandbox accounts
+  // configured in .env (Dome + 2 children). Production companies aren't
+  // configured this way yet — this only covers sandbox testing.
+  private resolveCredentials(companyId: string): { username: string; password: string } {
+    const accounts: Array<{ idKey: string; userKey: string; passKey: string }> = [
+      { idKey: 'SIMPLE_SALON_DOME_COMPANY_ID', userKey: 'SIMPLE_SALON_DOME_USERNAME', passKey: 'SIMPLE_SALON_DOME_PASSWORD' },
+      { idKey: 'SIMPLE_SALON_CHILD1_COMPANY_ID', userKey: 'SIMPLE_SALON_CHILD1_USERNAME', passKey: 'SIMPLE_SALON_CHILD1_PASSWORD' },
+      { idKey: 'SIMPLE_SALON_CHILD2_COMPANY_ID', userKey: 'SIMPLE_SALON_CHILD2_USERNAME', passKey: 'SIMPLE_SALON_CHILD2_PASSWORD' },
+    ];
+    for (const acc of accounts) {
+      if (this.config.get<string>(acc.idKey) === companyId) {
+        return {
+          username: this.requireEnv(acc.userKey),
+          password: this.requireEnv(acc.passKey),
+        };
+      }
+    }
+    throw new BadRequestException(
+      `No configured username/password for companyId ${companyId} — check backend/.env (only the 3 sandbox accounts are configured).`,
+    );
+  }
+
+  private async login(companyId: string): Promise<SimpleSalonSession> {
+    const { username, password } = this.resolveCredentials(companyId);
+    const companyToken = this.computeCompanyToken(companyId);
+
+    const response = await fetch(`${this.baseUrl}/v1/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': this.userAgent,
+        'X-Company-Token': companyToken,
+        'X-Partner-Token': this.partnerToken,
+      },
+      body: JSON.stringify({ username, password, company_id: Number(companyId) }),
+    });
+    const body = (await response.json()) as LoginResponse;
+    if (!response.ok || !body.success) {
+      throw new BadRequestException(`Simple Salon login failed for company ${companyId}: ${JSON.stringify(body)}`);
+    }
+
+    const session: SimpleSalonSession = { token: body.token, apiUrl: body.api_url, expiresAt: new Date(body.expiry) };
+    this.sessions.set(companyId, session);
+    this.logger.log(`Logged in to Simple Salon company ${companyId}, api_url=${session.apiUrl}`);
+    return session;
+  }
+
+  private async refresh(companyId: string, session: SimpleSalonSession): Promise<SimpleSalonSession> {
+    const response = await fetch(`${session.apiUrl}/v1/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: session.token }),
+    });
+    const body = (await response.json()) as LoginResponse;
+    if (!response.ok || !body.success) {
+      this.logger.warn(`Refresh failed for company ${companyId}, falling back to full login`);
+      return this.login(companyId);
+    }
+    const refreshed: SimpleSalonSession = { token: body.token, apiUrl: body.api_url, expiresAt: new Date(body.expiry) };
+    this.sessions.set(companyId, refreshed);
+    return refreshed;
+  }
+
+  private async getSession(companyId: string): Promise<SimpleSalonSession> {
+    const existing = this.sessions.get(companyId);
+    if (!existing) return this.login(companyId);
+    if (existing.expiresAt.getTime() - REFRESH_SKEW_MS > Date.now()) return existing;
+    return this.refresh(companyId, existing);
+  }
+
+  // Raw diagnostic call — POST {api_url}{path} with the session's Bearer
+  // token, whatever body you give it. Returns status + body untouched. Use
+  // this to confirm the real roster/appointments endpoint path and response
+  // shape before trusting anything in simple-salon-roster-sync.service.ts.
+  async rawPost(
     companyId: string,
     path: string,
-    query?: Record<string, string>,
-  ): Promise<{ status: number; ok: boolean; body: unknown }> {
-    const url = new URL(path, this.baseUrl);
-    for (const [key, value] of Object.entries(query ?? {})) {
-      url.searchParams.set(key, value);
-    }
-
-    const response = await fetch(url.toString(), { headers: this.buildAuthHeaders(companyId) });
+    body?: Record<string, unknown>,
+  ): Promise<{ status: number; ok: boolean; body: unknown; apiUrl: string }> {
+    const session = await this.getSession(companyId);
+    const response = await fetch(`${session.apiUrl}${path}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(body ?? {}),
+    });
     const text = await response.text();
-    let body: unknown = text;
+    let parsed: unknown = text;
     try {
-      body = JSON.parse(text);
+      parsed = JSON.parse(text);
     } catch {
-      // not JSON — return the raw text as-is, still useful for diagnosis
+      // not JSON — return raw text, still useful for diagnosis
     }
-    return { status: response.status, ok: response.ok, body };
+    return { status: response.status, ok: response.ok, body: parsed, apiUrl: session.apiUrl };
   }
 
-  async get<T = unknown>(companyId: string, path: string, query?: Record<string, string>): Promise<T> {
-    const result = await this.rawGet(companyId, path, query);
+  async post<T = unknown>(companyId: string, path: string, body?: Record<string, unknown>): Promise<T> {
+    const result = await this.rawPost(companyId, path, body);
     if (!result.ok) {
       throw new BadRequestException(
         `Simple Salon API ${path} returned ${result.status}: ${JSON.stringify(result.body)}`,

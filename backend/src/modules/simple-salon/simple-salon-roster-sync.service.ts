@@ -62,7 +62,16 @@ export class SimpleSalonRosterSyncService {
   }): Promise<RosterSyncResult> {
     const { companyId, salonId, dateFrom, dateTo } = params;
 
-    const raw = await this.apiClient.get(companyId, this.apiClient.rosterPath, { dateFrom, dateTo });
+    // Body param names (date_from/date_to vs dateFrom/dateTo etc.) are still
+    // unconfirmed — see file header in simple-salon-api.client.ts. Sending
+    // both common conventions costs nothing and the API should just ignore
+    // whichever one it doesn't recognise.
+    const raw = await this.apiClient.post(companyId, this.apiClient.rosterPath, {
+      date_from: dateFrom,
+      date_to: dateTo,
+      dateFrom,
+      dateTo,
+    });
     const rawEntries = this.unwrapEntries(raw);
 
     const normalized: NormalizedRosterEntry[] = [];
