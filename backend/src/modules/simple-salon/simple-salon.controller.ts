@@ -44,12 +44,38 @@ export class SimpleSalonController {
   // locally by simple_salon_id (see the class comment in
   // simple-salon-roster-sync.service.ts for why unmatched employees aren't
   // auto-created). Returns a summary rather than the full written rows.
-  @Post('roster/sync')
-  async syncRoster(
+  //
+  // Exposed as both GET and POST on purpose: POST is the "real" verb for an
+  // action with side effects, but GET makes it browser-pasteable for manual
+  // testing, matching every other diagnostic endpoint in this module.
+  // (NestJS doesn't let one method carry both an @Get and @Post decorator —
+  // only the last one registers — hence two thin methods sharing the logic.)
+  // Example: GET /simple-salon/roster/sync?companyId=40552&salonId=test&dateFrom=2026-08-03&dateTo=2026-08-10
+  @Get('roster/sync')
+  async syncRosterGet(
     @Query('companyId') companyId: string,
     @Query('salonId') salonId: string,
     @Query('dateFrom') dateFrom: string,
     @Query('dateTo') dateTo: string,
+  ): Promise<RosterSyncResult> {
+    return this.syncRoster(companyId, salonId, dateFrom, dateTo);
+  }
+
+  @Post('roster/sync')
+  async syncRosterPost(
+    @Query('companyId') companyId: string,
+    @Query('salonId') salonId: string,
+    @Query('dateFrom') dateFrom: string,
+    @Query('dateTo') dateTo: string,
+  ): Promise<RosterSyncResult> {
+    return this.syncRoster(companyId, salonId, dateFrom, dateTo);
+  }
+
+  private async syncRoster(
+    companyId: string,
+    salonId: string,
+    dateFrom: string,
+    dateTo: string,
   ): Promise<RosterSyncResult> {
     if (!companyId || !salonId || !dateFrom || !dateTo) {
       throw new BadRequestException(
